@@ -1,0 +1,401 @@
+/* 
+r = reference (command)
+x = signal value
+*/
+
+----------------------------------------------------------------------
+--                          Useful nodes                            --
+----------------------------------------------------------------------
+
+node max_input (x, y: real) returns (max_value: real)
+let
+    max_value = if x >= y then x 
+                else y;
+tel
+
+
+-- returns the absolute value of our signal
+node absolute_value (x: real) returns (abs: real)
+let
+    abs = if x >= 0.0 then x 
+          else -x;
+tel 
+
+
+
+----------------------------------------------------------------------
+--                      Performance properties                      --
+----------------------------------------------------------------------
+
+
+-- first time we reach the command
+-- we check the sign changement of the difference 
+-- between the current value and the command
+node reach_command (x, r: real) returns (r_x: bool)
+let
+    r_x = false -> (x = r) or ((x-r)*pre(x-r) < 0.0);
+tel
+
+-- we look at the signal derivate
+-- when the sign changes a first time => we reached a peak
+node peak (x: real) returns (peak_x: bool)
+let
+    peak_x = false -> 
+        if pre(x -> pre x) < pre(x)
+        then if pre(x) >= x
+            then true
+            else false
+        else if pre(x -> pre x) > pre(x)
+            then if pre(x) <= x
+            then true
+            else false
+        else false;
+tel
+
+-- all the peaks after having reached a first time the command
+-- usefull to study the oscillations of the signal
+node peak_after_reached_command (x,r: real) returns (peaks: bool)
+var command_reached : bool;
+let
+    command_reached =  false -> reach_command(x, r) or pre(command_reached);
+    peaks = command_reached and peak(x);
+
+tel
+
+-- overshoot => the first peak after exceeding the command
+node overshoot_time (x, r: real) returns (ov_x: bool)
+var command_reached : bool;
+let
+    command_reached =  false -> reach_command(x, r) or pre(command_reached);
+    ov_x = first(command_reached and peak(x));
+tel
+
+-- returns the last peak value
+-- same then overshoot value but at each peak, not only the first one
+node last_peak_amp(x, r: real) returns (x_value: real)
+let
+    x_value = if peak(x) then (absolute_value(0.0 -> pre(x-r)))
+          else 0.0 -> pre(x_value);
+tel
+
+-- returns 1 the first time a signal x is true
+-- and 0 else
+node first (x: bool) returns (first_out: bool)
+var reached: bool;
+let
+    first_out = x -> 
+                if x and not pre(reached) then true
+                else false;
+    reached =   x -> x or pre(reached);
+tel
+
+-- verifies monocity:
+-- if a signal is increasing, it has to continue to increase
+-- if a signal is decreasing, il has to continue to decrease
+node monotonicity (x: real) returns (monotonicity_ok: bool)
+let
+    monotonicity_ok = true -> 
+        if pre(x -> pre x) < pre(x)
+            then if pre(x) < x
+                then true
+                else false
+        else if pre(x -> pre x) > pre(x)
+            then if pre(x) > x
+                then true
+                else false
+        else true;
+tel
+
+
+----------------------------------------------------------------------
+--                      Useful nodes Eventually                     --
+----------------------------------------------------------------------
+
+node min (a,b: int) returns (valeur_min: int);
+let
+    valeur_min =
+        if a <= b then a
+        else b;
+tel
+
+node exist (inside_time_interval: bool ; prop: bool) returns (output: bool);
+let
+    output = (inside_time_interval and prop) or (false -> pre output);
+tel
+
+node forall_a (inside_time_interval: bool ; prop: bool) returns (output: bool);
+let 
+    output = not(exist(inside_time_interval, not prop));
+tel
+
+
+----------------------------------------------------------------------
+--          Time node: we are in the [a,b] interval                 --
+----------------------------------------------------------------------
+
+-- Implementation node exposing all internal flows to specifying them
+
+node timeab_tmp (const a,b: int) returns (internal_clk: int;
+     		       	    	 	  inside_time_interval: bool);
+let
+    internal_clk = min((0 -> 1 + pre internal_clk), b);
+    inside_time_interval = (internal_clk >= a) and not ((-1 -> pre internal_clk) = b);
+tel
+
+-- Final Implementation node hiding internal flows
+
+node timeab (const a,b: int) returns (inside_time_interval: bool);
+var iclk: int; 
+let
+   iclk, inside_time_interval = timeab_tmp(a,b);
+tel
+
+----------------------------------------------------------------------
+--                            Eventually                            --
+----------------------------------------------------------------------
+
+-- Eventually True:
+-- true when we are sure that property is satisfied
+node eventually_true (const a,b: int ; phi: bool)
+             returns (output_ev_true: bool);
+let
+   output_ev_true = exist (timeab (a, b), phi);
+tel
+
+
+-- Eventually False: 
+-- true when we are sure that property is not satisfied
+node eventually_false (const a,b: int ; phi: bool) 
+returns (output_ev_false: bool);
+var ev_time: int;
+let
+    ev_time = min(0 -> pre ev_time + 1, b);
+
+    output_ev_false = (ev_time = b) and 
+    (forall_a (timeab (a,b), not phi));
+tel
+
+
+--------------------- Eventually three-valued  -----------------------
+
+node eventually_3v(const a,b:int; phi: bool)
+  returns (output_ev_true, output_ev_false: bool);
+let
+  output_ev_true = eventually_true(a,b,phi);
+  output_ev_false = eventually_false(a,b,phi);
+tel
+
+
+
+----------------------------------------------------------------------
+--                            Always                                --
+----------------------------------------------------------------------
+
+-- Always True:
+-- true when we are sure that property is satisfied
+
+
+node always_true (const a,b: int ; phi: bool) returns (output_alw_true: bool);
+var alw_time: int;
+let
+    alw_time = min(0 -> pre alw_time + 1, b);
+
+    output_alw_true = (alw_time = b) and 
+    (forall_a ( timeab(a,b), phi ) );
+tel
+
+
+-- Always False: 
+-- true when we are sure that property is not satisfied
+
+node always_false (const a,b: int ; phi: bool) returns (output_alw_false: bool);
+var alw_time: int;
+let 
+   alw_time = min(0 -> pre alw_time + 1, b);
+   
+   output_alw_false = exist (timeab(a, b), not phi);
+tel
+
+
+--------------------- Always three-valued  -----------------------
+
+node always_3v(const a,b:int; phi: bool)
+  returns (output_alw_true, output_alw_false: bool);
+(*@contract 
+
+  assume a<b and a>=0;
+ 
+  -- their are mutually exclusive
+  guarantee not (output_alw_true and output_alw_false);
+*)
+let  
+    output_alw_true = always_true(a,b,phi);
+    output_alw_false = always_false(a,b,phi);
+tel
+
+
+
+
+
+----------------------------------------------------------------------
+--                               Until                              --
+----------------------------------------------------------------------
+
+node until_true (const a,b: int ; phi1, phi2: bool) returns (result_until_true: bool);
+var until_time: int;
+let
+    -- internal clock
+    until_time = min(0 -> pre until_time + 1, b);
+
+    -- intialisation (case t=0)
+    result_until_true = 
+    (phi1 and phi2 and (a=0)) ->
+    
+    -- we are at least at time a
+    (until_time >= a and
+    -- there exists an instant when
+    (exist(timeab(a,b), 
+    -- phi2 is true and until this moment phi1 is true
+    ((phi2) and forall_a(timeab(0,b),phi1)))));   
+tel
+
+
+-- Until False
+-- True when we are sure that until property is violated
+
+node until_false (const a,b: int ; phi1, phi2: bool) returns (result_until_false: bool);
+var until_time: int;
+let
+    -- internal clock
+    until_time = min(0 -> pre until_time + 1, b);
+
+    -- init t=0 : until is violated if phi1 is false
+    result_until_false = not phi1 ->
+
+    -- violated if phi1 false before a
+    ((until_time <= a) and (not phi1)) or
+    -- violated if phi2 is never reached during the time interval
+    ((until_time >= b) and not (exist(timeab(a,b), 
+    -- phi2 is true and until this moment phi1 is true
+    ((phi2) and forall_a(timeab(0,b),phi1))))) or
+    -- violated if we are in the time interval...
+    (until_time > a and until_time <= b and 
+    -- ... and there is a moment where phi1 is false and phi2 was never true
+    exist(timeab(a,b), not phi1) and not (exist(timeab(a,b), 
+    -- phi2 is true and until this moment phi1 is true
+    ((phi2) and forall_a(timeab(0,b),phi1)))))
+    -- still violated if it was violated once in the past
+    or pre result_until_false;
+tel
+
+
+
+--------------------- Until three-valued  -----------------------
+
+node until_3v(const a,b:int; phi1, phi2: bool)
+  returns (output_unt_true, output_unt_false: bool);
+(*@contract 
+
+  assume a<b and a>=0;
+ 
+  -- their are mutually exclusive
+  guarantee not (output_unt_true and output_unt_false);
+*)
+let  
+    output_unt_true = until_true(a,b,phi1, phi2);
+    output_unt_false = until_false(a,b,phi1, phi2);
+tel
+
+
+---------------------------------------------------------------------
+---------------------------------------------------------------------
+---------------------------------------------------------------------
+
+-- P1 : we want to reach the command before time t1
+node main_P1 (x, r: real ; const t1: int) returns (out_pos, out_neg: bool)
+let
+    out_pos, out_neg = eventually_3v(0, t1, reach_command(x, r));
+tel
+
+node test_main_P1(x: real) returns (out_pos, out_neg: bool)
+let
+    out_pos, out_neg = main_P1(x, 10.0, 4);
+tel
+
+
+-- P2 : we want to reach the overshoot before time t2
+node main_P2 (x,r: real ; const t2: int) returns (out_pos, out_neg: bool)
+let
+    out_pos, out_neg = eventually_3v(0, t2, overshoot_time(x,r));
+tel
+
+-- P3 : we check that the amplitude of oscillations is less than 
+-- a percentage of the command
+node main_P3 (x,r, amp_max: real ; const t3: int) returns (out_pos, out_neg: bool)
+let
+    out_pos, out_neg = always_3v(0, t3, last_peak_amp(x, r) <= amp_max/100.0*r);
+tel
+
+-- P4 : the signal value must increase (or respectively decrease) continuously 
+-- until the given command is reached, within a given time interval [t4, t5]
+node main_P4 (x, r: real ; const t4, t5: int) returns (out_pos, out_neg: bool)
+let
+    out_pos, out_neg = until_3v(t4, t5, monotonicity(x), reach_command(x,r));
+tel
+
+
+
+
+
+----------------------------------------------------------------------
+--                              Backup                              --
+----------------------------------------------------------------------
+
+
+
+(* old version
+-- overshoot => the first peak after exceeding the command
+-- we look at the signal derivate
+-- when the sign changes a first time => we reached overshoot
+-- in this specific node, we return 1 each time a peak of the
+-- curve is reached (the moment just after the top one)
+node overshoot_time (x: real) returns (ov_x: bool)
+let
+    -- comment on fait pour mettre false -> false -> ... ?
+    
+    ov_x = false -> 
+            if pre(x -> pre x) < pre(x)
+            then if pre(x) >= x
+             then true
+             else false
+            else if pre(x -> pre x) > pre(x)
+             then if pre(x) <= x
+              then true
+              else false
+            else false;
+tel
+
+-- returns the first overshoot value(and 0 before the first time
+-- we reached the overshoot value)
+node overshoot_value (x, r: real) returns (ov: real)
+let
+    ov = if first(overshoot_time(x)) then absolute_value(pre(x-r))
+         else 0.0 -> pre(ov);
+tel
+
+
+-- returns the last peak value
+-- same then overshoot value but at each peak, not only the first one
+node last_overshoot_value(x, r: real) returns (amp: real)
+let
+    amp = if overshoot_time(x) then absolute_value(pre(x-r))
+          else 0.0 -> pre(amp);
+tel
+
+
+-- returns the overshoot
+node max_overshoot_value (x, r: real) returns (max_ov: real)
+let
+    max_ov = max_input(last_overshoot_value(x, r), 0.0 -> pre(max_ov));
+tel                                                                                            
+ *)

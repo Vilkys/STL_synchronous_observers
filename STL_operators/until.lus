@@ -1,0 +1,291 @@
+--- Instructions
+(*
+
+  With recent kind2 (v1.8.0-131-gfe7b2f0), full file analysis takes
+  97s. 
+  
+  For older version, trying to solve all at once seems to be too
+  difficult.
+
+  Instead, one can run the three commands:
+  # kind2  --lus_main proof_ev_true thisfile.lus
+  # kind2  --lus_main proof_ev_false thisfile.lus
+  # kind2  --lus_main eventually3v thisfile.lus
+
+  This will validate simplified nodes focusing on true/false output
+  before checking the validity of a main node combining the two.
+
+  This file is organized as follows:
+  - useful nodes: min, P_at_k, exist
+  - time node: both spec and implementation, with equivalence proof
+  - eventually false: both implementation node, and proof node with
+    two proofs encoded:
+    - base case for intervals of size 1 [a,a+1]
+    - inductive case considering intervals [a,b+1] while assuming
+      property valid for sub-intervals
+  - eventually true with a similar structure
+  - main node: eventually_3v return two booleans	
+*)
+
+
+(* This is a sample node to illustrate contracts in kind2 *)
+node foo (X,Y:bool) returns (X2,Y2:bool);
+(*@contract
+ 	assume (X=Y);
+ 	guarantee ((false -> pre X2) = (false -> pre Y2));
+	*)
+let
+ X2 = Y;
+ Y2 = X;
+tel
+
+
+----------------------------------------------------------------------
+--                          Useful nodes                            --
+----------------------------------------------------------------------
+
+
+node min (a,b: int) returns (valeur_min: int);
+let
+    valeur_min =
+        if a <= b then a
+        else b;
+tel
+
+
+node max (a,b: int) returns (valeur_max: int);
+let
+    valeur_max =
+        if a <= b then b
+        else a;
+tel
+
+
+-- true since the property is satisfied into the time interval
+node exist (inside_time_interval: bool ; prop: bool) returns (output: bool);
+let
+    output = (inside_time_interval and prop) -> (inside_time_interval and prop) or (pre output);
+tel
+
+
+
+-- true if the property is satisfied every time during the time interval
+node forall_a (inside_time_interval: bool ; prop: bool) returns (output: bool);
+let 
+    output = not(exist(inside_time_interval, not prop));
+tel
+
+
+
+
+----------------------------------------------------------------------
+--          Time node: we are in the [a,b] interval                 --
+----------------------------------------------------------------------
+
+-- Specification node with explicit clock as an argument 
+
+node timeab_exp (const a,b: int; clk: int) returns (isin: bool);
+(*@contract
+    assume a>=0;               -- valid interval 
+    -- assume true -> pre clk = clk -1;-- some hypothesis on clocks
+*)
+let
+    isin = clk >= a and clk <= b;
+tel
+
+-- Implementation node exposing all internal flows to specifying them
+
+node timeab_tmp (const a,b: int) returns (internal_clk: int;
+     		       	    	 	  inside_time_interval: bool);
+(*@contract
+	var clk : int = 0 -> 1 + pre clk;
+  assume a>=0;
+	-- guarantee internal_clk <= b;
+	guarantee (clk <= b) => internal_clk = clk;
+	-- guarantee inside_time_interval = timeab_exp(a,b, clk);
+*)
+let
+    internal_clk = min((0 -> 1 + pre internal_clk), b);
+    inside_time_interval = (internal_clk >= a) and not ((-1 -> pre internal_clk) = b);
+tel
+
+-- Final Implementation node hiding internal flows
+
+node timeab (const a,b: int) returns (inside_time_interval: bool);
+(*@contract
+	var clk : int = 0 -> 1 + pre clk;
+	assume a>=0;
+	guarantee inside_time_interval = timeab_exp(a,b, clk);
+*)
+var iclk: int; 
+let
+   iclk, inside_time_interval = timeab_tmp(a,b);
+tel
+
+
+node P_at_k (const k: int; clk:int; P:bool) returns (ok: bool);
+(* contract
+    assume k >= 0;                                    -- valid index
+    assume clk >= 0 and (true -> clk = 1 + pre clk ); -- valid clock
+ *)
+let
+  ok = if clk = k then P else (false -> pre ok);
+tel
+
+
+
+
+----------------------------------------------------------------------
+--                               Until                              --
+----------------------------------------------------------------------
+
+node until_true (const a,b: int ; phi1, phi2: bool) returns (result_until_true: bool);
+var until_time: int;
+let
+    -- internal clock
+    until_time = min(0 -> pre until_time + 1, b);
+
+    -- intialisation (case t=0)
+    result_until_true = 
+    (phi1 and phi2 and (a=0)) ->
+    
+    -- we are at least at time a
+    (until_time >= a and
+    -- there exists an instant when
+    (exist(timeab(a,b), 
+    -- phi2 is true and until this moment phi1 is true
+    ((phi2) and forall_a(timeab(0,b),phi1)))));   
+tel
+
+
+node proof_until_true (const a,b:int ; phi1, phi2: bool) returns (base_case, ind_case1, ind_case2: bool);
+(*@contract
+    assume a<b and a>=0;
+    guarantee base_case;
+    guarantee ind_case1;
+    guarantee ind_case2;
+*)
+
+
+var clk : int;
+    output_until_true: bool;
+    output_until_true_bp1: bool;
+    -- output_test: bool;
+    output_test_2:bool;
+let
+  clk = 0 -> 1 + pre clk;
+  
+  output_until_true = until_true(a, b, phi1, phi2);
+  output_until_true_bp1 = until_true(a, b+1, phi1, phi2);
+  output_test_2 = P_at_k(0, clk, phi1);
+  
+  base_case = (b=1 and a=0) =>
+    output_until_true = (P_at_k(a, clk, phi1) and 
+    (P_at_k(a, clk, phi2) or (P_at_k(a+1, clk, phi1) and P_at_k(a+1, clk, phi2))));
+
+
+  ind_case1 = (b=a+1 and a>0) => 
+    (output_until_true = (forall_a(timeab(0,a), phi1) and 
+    (P_at_k(a, clk, phi2) or (P_at_k(a+1, clk, phi1) and P_at_k(a+1, clk, phi2)))));
+    
+    
+  ind_case2 = 
+    output_until_true_bp1 = 
+    (output_until_true or forall_a(timeab(0,b+1), phi1) and P_at_k(b+1, clk, phi2));
+  
+
+tel
+
+-- Until False
+-- True when we are sure that until property is violated
+
+node until_false (const a,b: int ; phi1, phi2: bool) returns (result_until_false: bool);
+var until_time: int;
+let
+    -- internal clock
+    until_time = min(0 -> pre until_time + 1, b);
+
+    -- init t=0 : until is violated if phi1 is false
+    result_until_false = not phi1 ->
+
+    -- violated if phi1 false before a
+    ((until_time <= a) and (not phi1)) or
+    -- violated if phi2 is never reached during the time interval
+    ((until_time >= b) and not (exist(timeab(a,b), 
+    -- phi2 is true and until this moment phi1 is true
+    ((phi2) and forall_a(timeab(0,b),phi1))))) or
+    -- violated if we are in the time interval...
+    (until_time > a and until_time <= b and 
+    -- ... and there is a moment where phi1 is false and phi2 was never true
+    exist(timeab(a,b), not phi1) and not (exist(timeab(a,b), 
+    -- phi2 is true and until this moment phi1 is true
+    ((phi2) and forall_a(timeab(0,b),phi1)))))
+    -- still violated if it was violated once in the past
+    or pre result_until_false;
+tel
+
+
+node proof_until_false (const a,b:int ; phi1, phi2: bool) returns (base_case, ind_case1, ind_case2: bool);
+(*@contract
+    assume a<b and a>=0;
+    -- guarantee base_case;
+    -- guarantee ind_case1;
+    guarantee ind_case2;
+*)
+var clk : int;
+    output_until_false:bool; 
+    output_until_false_bp1:bool;
+    output_until_true:bool; 
+    -- output_test:bool;   
+    -- output_test2:bool;
+let
+  clk = 0 -> 1 + pre clk;
+  
+  output_until_false = until_false(a, b, phi1, phi2);
+  output_until_false_bp1 = until_false(a, b+1, phi1, phi2);
+  output_until_true = until_true(a, b, phi1, phi2);
+  -- output_test = 
+  -- output_test2 = forall_a(timeab(0,b), phi1) and forall_a(timeab(a,b), not phi2);
+  
+
+  base_case = (b=1 and a=0) =>
+    output_until_false = (P_at_k(a, clk, not phi1) or 
+    (P_at_k(a, clk, not phi2) and 
+    (P_at_k(a+1, clk, not phi1) or P_at_k(a+1, clk, not phi2))));
+
+
+  ind_case1 = (b=a+1 and a>0) => 
+    (output_until_false = (exist(timeab(0,a), not phi1) or 
+    (P_at_k(a, clk, not phi2) and 
+    (P_at_k(a+1, clk, not phi1) or P_at_k(a+1, clk, not phi2)))));
+
+
+  ind_case2 = output_until_false_bp1 = 
+    -- either it was false on [a,b]
+    ((output_until_false and not 
+    -- ...for another reason than never having phi2 in time interval
+    (forall_a(timeab(0,b), phi1) and forall_a(timeab(a,b), not phi2)))
+    -- or it was not already satisfied
+    or (not output_until_true and 
+    -- and phi1 or phi2 is not satisfied => still not true at b+1
+    (P_at_k(b+1, clk, not phi1) or P_at_k(b+1, clk, not phi2))));
+    
+tel
+
+
+
+--------------------- Until three-valued  -----------------------
+
+node until_3v(const a,b:int; phi1, phi2: bool)
+  returns (output_unt_true, output_unt_false: bool);
+(*@contract 
+
+  assume a<b and a>=0;
+ 
+  -- their are mutually exclusive
+  guarantee not (output_unt_true and output_unt_false);
+*)
+let  
+    output_unt_true = until_true(a,b,phi1, phi2);
+    output_unt_false = until_false(a,b,phi1, phi2);
+tel

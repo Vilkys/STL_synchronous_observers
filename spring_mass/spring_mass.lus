@@ -1,0 +1,412 @@
+--lead lag controller for the spring mass system
+
+--input:  desired position yd,  current position y
+--output: force applied to mass
+
+node sat(a: real) returns (b: real);
+let
+b = if a>=1.0 then 1.0 else (if a<=-1.0 then -1.0 else a);
+tel
+
+node spring_mass_controller(y, y_d: real)
+returns (out_1: real);
+var x_1, x_2, in_1: real;
+let 
+in_1 = sat(y-y_d);
+x_1 = 0.0 -> 0.499 * pre x_1 - 0.05* pre x_2 + 1.0* pre in_1 ;
+x_2 = 0.0 -> 0.01*pre x_1 + 1.0*pre x_2 ;
+
+out_1 = 564.48 *x_1 - 1280.0 *in_1 ;
+tel 
+
+node spring_mass_plant(in : real)
+returns (out: real);
+var x_1, x_2: real;
+let
+  x_1 = 0.00005 *in -> pre x_1 + 0.01*pre x_2 + 0.00005*in;
+  x_2 = 0.01*in -> -0.01*pre x_1 + pre x_2 + 0.01*in;
+  out = 1.0*x_1+0.0*x_2;
+tel
+
+
+node full_system (y_d: real) returns (pos: real; force: real);
+let
+  -- assert (y_d <= 0.5 and y_d >= -0.5 );
+  force = 0.0 -> pre (spring_mass_controller(pos, y_d));
+  pos = 0.0 -> spring_mass_plant(force);
+tel
+
+node simu (rien: bool) returns  (pos: real; force: real);
+let
+	pos, force = full_system(30.0);
+tel 
+
+-- P1 : we want to reach the command before timestamp 20
+node main_P1 (nothing: bool) 
+returns (out_pos, out_neg: bool ; iteration: int ; pos: real)
+var command: real;
+    force: real;
+let
+   command = 0.3;
+   iteration = 0 -> pre(iteration) + 1;
+   pos, force = full_system(command);
+   out_pos, out_neg = eventually_3v(0, 20, reach_command(pos, command));
+tel
+
+-- P2 : we want to reach the overshoot between timestamp 5 and 20
+node main_P2 (nothing: bool) 
+returns (out_pos, out_neg: bool ; iteration: int ; pos:real)
+var command: real;
+    force: real;
+let
+    command = 0.3;
+    iteration = 0 -> pre(iteration) + 1;
+    pos, force = full_system(command);
+    out_pos, out_neg = eventually_3v(0, 20, overshoot_time(pos,command));
+tel
+
+-- P3 : the amplitude of the signal after reaching the command must not 
+-- exceed 20% of the command, during the first 100 time steps of system execution
+node main_P3 (nothing: bool) 
+returns (out_pos, out_neg: bool ; iteration: int ; pos: real);
+var command: real;
+    force: real;
+let
+    command = 0.3;
+    iteration = 0 -> pre(iteration) + 1;
+    pos, force = full_system(command);
+    out_pos, out_neg = always_3v(0, 50, last_peak_amp(pos,command) < 0.2*command);
+tel
+
+-- P4 : the monotonicity of the system must be maintained until the command 
+-- is reached, which must happen within the time interval [3,15]
+node main_P4 (nothing: bool)
+returns (out_pos, out_neg: bool ; iteration: int);
+var command: real;
+    pos, force: real;
+    phi1, phi2: bool;
+let 
+    command = 0.3;
+    iteration = 0 -> pre(iteration) + 1;
+    pos, force = full_system(command);
+    phi1 = monotonicity(pos);
+    phi2 = reach_command(pos, command);
+    out_pos, out_neg = until_3v(3, 15, phi1, phi2);
+tel
+
+
+----------------------------------------------------------------------
+--                          Useful nodes                            --
+----------------------------------------------------------------------
+
+node max_input (x, y: real) returns (max_value: real)
+let
+    max_value = if x >= y then x 
+                else y;
+tel
+
+
+-- returns the absolute value of our signal
+node absolute_value (x: real) returns (abs: real)
+let
+    abs = if x >= 0.0 then x 
+          else -x;
+tel 
+
+
+
+----------------------------------------------------------------------
+--                      Performance properties                      --
+----------------------------------------------------------------------
+
+
+-- r = reference (command)
+-- x = signal value
+
+
+-- first time we reach the command
+-- we check the sign changement of the difference 
+-- between the current value and the command
+node reach_command (x, r: real) returns (r_x: bool)
+let
+    r_x = false -> (x = r) or ((x-r)*pre(x-r) < 0.0);
+tel
+
+-- we look at the signal derivate
+-- when the sign changes a first time => we reached a peak
+node peak (x: real) returns (peak_x: bool)
+let
+    peak_x = false -> 
+        if pre(x -> pre x) < pre(x)
+        then if pre(x) >= x
+            then true
+            else false
+        else if pre(x -> pre x) > pre(x)
+            then if pre(x) <= x
+            then true
+            else false
+        else false;
+tel
+
+-- all the peaks after having reached a first time the command
+-- usefull to study the oscillations of the signal
+node peak_after_reached_command (x,r: real) returns (peaks: bool)
+var command_reached : bool;
+let
+    command_reached =  false -> reach_command(x, r) or pre(command_reached);
+    peaks = command_reached and peak(x);
+
+tel
+
+-- overshoot => the first peak after exceeding the command
+node overshoot_time (x, r: real) returns (ov_x: bool)
+var command_reached : bool;
+let
+    command_reached =  false -> reach_command(x, r) or pre(command_reached);
+    ov_x = first(command_reached and peak(x));
+tel
+
+-- returns the last peak value
+-- same then overshoot value but at each peak after having reach the command
+node last_peak_amp(x, r: real) returns (x_value: real)
+let
+    x_value = if peak_after_reached_command(x,r) then (absolute_value(0.0 -> pre(x-r)))
+          else 0.0 -> pre(x_value);
+tel
+
+-- returns 1 the first time a signal x is true
+-- and 0 else
+node first (x: bool) returns (first_out: bool)
+var reached: bool;
+let
+    first_out = x -> 
+                if x and not pre(reached) then true
+                else false;
+    reached =   x -> x or pre(reached);
+tel
+
+-- verifies monocity:
+-- if a signal is increasing, it has to continue to increase
+-- if a signal is decreasing, il has to continue to decrease
+node monotonicity (x: real) returns (monotonicity_ok: bool)
+let
+    monotonicity_ok = true -> 
+        if pre(x -> pre x) < pre(x)
+            then if pre(x) < x
+                then true
+                else false
+        else if pre(x -> pre x) > pre(x)
+            then if pre(x) > x
+                then true
+                else false
+        else true;
+tel
+
+
+----------------------------------------------------------------------
+--                      Useful nodes Eventually                     --
+----------------------------------------------------------------------
+
+node min (a,b: int) returns (valeur_min: int);
+let
+    valeur_min =
+        if a <= b then a
+        else b;
+tel
+
+node exist (inside_time_interval: bool ; prop: bool) returns (output: bool);
+let
+    output = (inside_time_interval and prop) or (false -> pre output);
+tel
+
+node forall_a (inside_time_interval: bool ; prop: bool) returns (output: bool);
+let 
+    output = not(exist(inside_time_interval, not prop));
+tel
+
+
+----------------------------------------------------------------------
+--          Time node: we are in the [a,b] interval                 --
+----------------------------------------------------------------------
+
+-- Implementation node exposing all internal flows to specifying them
+
+node timeab_tmp (a,b: int) returns (internal_clk: int;
+     		       	    	 	  inside_time_interval: bool);
+let
+    internal_clk = min((0 -> 1 + pre internal_clk), b);
+    inside_time_interval = (internal_clk >= a) and not ((-1 -> pre internal_clk) = b);
+tel
+
+-- Final Implementation node hiding internal flows
+
+node timeab (a,b: int) returns (inside_time_interval: bool);
+var iclk: int; 
+let
+   iclk, inside_time_interval = timeab_tmp(a,b);
+tel
+
+----------------------------------------------------------------------
+--                            Eventually                            --
+----------------------------------------------------------------------
+
+-- Eventually True:
+-- true when we are sure that property is satisfied
+node eventually_true (a,b: int ; phi: bool)
+             returns (output_ev_true: bool);
+let
+   output_ev_true = exist (timeab (a, b), phi);
+tel
+
+
+-- Eventually False: 
+-- true when we are sure that property is not satisfied
+node eventually_false (a,b: int ; phi: bool) 
+returns (output_ev_false: bool);
+var ev_time: int;
+let
+    ev_time = min(0 -> pre ev_time + 1, b);
+
+    output_ev_false = (ev_time = b) and 
+    (forall_a (timeab (a,b), not phi));
+tel
+
+
+--------------------- Eventually three-valued  -----------------------
+
+node eventually_3v(a,b:int; phi: bool)
+  returns (output_ev_true, output_ev_false: bool);
+let
+  output_ev_true = eventually_true(a,b,phi);
+  output_ev_false = eventually_false(a,b,phi);
+tel
+
+
+
+----------------------------------------------------------------------
+--                            Always                                --
+----------------------------------------------------------------------
+
+-- Always True:
+-- true when we are sure that property is satisfied
+
+
+node always_true (a,b: int ; phi: bool) returns (output_alw_true: bool);
+var alw_time: int;
+let
+    alw_time = min(0 -> pre alw_time + 1, b);
+
+    output_alw_true = (alw_time = b) and 
+    (forall_a ( timeab(a,b), phi ) );
+tel
+
+
+-- Always False: 
+-- true when we are sure that property is not satisfied
+
+node always_false (a,b: int ; phi: bool) returns (output_alw_false: bool);
+var alw_time: int;
+let 
+   alw_time = min(0 -> pre alw_time + 1, b);
+   
+   output_alw_false = exist (timeab(a, b), not phi);
+tel
+
+
+--------------------- Always three-valued  -----------------------
+
+node always_3v(a,b:int; phi: bool)
+  returns (output_alw_true, output_alw_false: bool);
+(*@contract 
+
+  assume a<b and a>=0;
+ 
+  -- their are mutually exclusive
+  guarantee not (output_alw_true and output_alw_false);
+*)
+let  
+    output_alw_true = always_true(a,b,phi);
+    output_alw_false = always_false(a,b,phi);
+tel
+
+
+
+
+
+----------------------------------------------------------------------
+--                               Until                              --
+----------------------------------------------------------------------
+
+node until_true (a,b: int ; phi1, phi2: bool) returns (result_until_true: bool);
+var until_time: int;
+let
+    -- internal clock
+    until_time = min(0 -> pre until_time + 1, b);
+
+    -- intialisation (case t=0)
+    result_until_true = 
+    (phi1 and phi2 and (a=0)) ->
+    
+    -- we are at least at time a
+    (until_time >= a and
+    -- there exists an instant when
+    (exist(timeab(a,b), 
+    -- phi2 is true and until this moment phi1 is true
+    ((phi2) and forall_a(timeab(0,b),phi1)))));   
+tel
+
+
+-- Until False
+-- True when we are sure that until property is violated
+
+node until_false (a,b: int ; phi1, phi2: bool) returns (result_until_false: bool);
+var until_time: int;
+let
+    -- internal clock
+    until_time = min(0 -> pre until_time + 1, b);
+
+    -- init t=0 : until is violated if phi1 is false
+    result_until_false = not phi1 ->
+
+    -- violated if phi1 false before a
+    ((until_time <= a) and (not phi1)) or
+    -- violated if phi2 is never reached during the time interval
+    ((until_time >= b) and not (exist(timeab(a,b), 
+    -- phi2 is true and until this moment phi1 is true
+    ((phi2) and forall_a(timeab(0,b),phi1))))) or
+    -- violated if we are in the time interval...
+    (until_time > a and until_time <= b and 
+    -- ... and there is a moment where phi1 is false and phi2 was never true
+    exist(timeab(a,b), not phi1) and not (exist(timeab(a,b), 
+    -- phi2 is true and until this moment phi1 is true
+    ((phi2) and forall_a(timeab(0,b),phi1)))))
+    -- still violated if it was violated once in the past
+    or pre result_until_false;
+tel
+
+
+
+--------------------- Until three-valued  -----------------------
+
+node until_3v(a,b:int; phi1, phi2: bool)
+  returns (output_unt_true, output_unt_false: bool);
+(*@contract 
+
+  assume a<b and a>=0;
+ 
+  -- their are mutually exclusive
+  guarantee not (output_unt_true and output_unt_false);
+*)
+let  
+    output_unt_true = until_true(a,b,phi1, phi2);
+    output_unt_false = until_false(a,b,phi1, phi2);
+tel
+
+
+---------------------------------------------------------------------
+---------------------------------------------------------------------
+---------------------------------------------------------------------
+
+
+
+

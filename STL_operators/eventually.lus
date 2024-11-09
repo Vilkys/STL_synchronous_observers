@@ -1,0 +1,252 @@
+--- Instructions
+(*
+
+  With recent kind2 (v1.8.0-131-gfe7b2f0), full file analysis takes
+  97s. 
+  
+  For older version, trying to solve all at once seems to be too
+  difficult.
+
+  Instead, one can run the three commands:
+  # kind2  --lus_main proof_ev_true thisfile.lus
+  # kind2  --lus_main proof_ev_false thisfile.lus
+  # kind2  --lus_main eventually3v thisfile.lus
+
+  This will validate simplified nodes focusing on true/false output
+  before checking the validity of a main node combining the two.
+
+  This file is organized as follows:
+  - useful nodes: min, P_at_k, exist
+  - time node: both spec and implementation, with equivalence proof
+  - eventually true: both implementation node, and proof node with
+    two proofs encoded:
+    - base case for intervals of size 1 [a,a+1]
+    - inductive case considering intervals [a,b+1] while assuming
+      property valid for sub-intervals
+  - eventually false with a similar structure
+  - main node: eventually_3v return two booleans	
+*)
+
+
+(* This is a sample node to illustrate contracts in kind2 *)
+node foo (X,Y:bool) returns (X2,Y2:bool);
+(*@contract
+ 	assume (X=Y);
+ 	guarantee ((false -> pre X2) = (false -> pre Y2));
+	*)
+let
+ X2 = Y;
+ Y2 = X;
+tel
+
+----------------------------------------------------------------------
+--                          Useful nodes                            --
+----------------------------------------------------------------------
+
+node min (a,b: int) returns (valeur_min: int);
+let
+    valeur_min =
+        if a <= b then a
+        else b;
+tel
+
+
+node P_at_k (const k: int; clk:int; P:bool) returns (ok: bool);
+(* contract
+    assume k >= 0;                                    -- valid index
+    assume clk >= 0 and (true -> clk = 1 + pre clk ); -- valid clock
+ *)
+let
+  ok = if clk = k then P else (false -> pre ok);
+tel
+
+node exist (inside_time_interval: bool ; prop: bool) returns (output: bool);
+let
+    output = (inside_time_interval and prop) or (false -> pre output);
+tel
+
+node forall_a (inside_time_interval: bool ; prop: bool) returns (output: bool);
+let 
+    output = not(exist(inside_time_interval, not prop));
+tel
+
+
+----------------------------------------------------------------------
+--          Time node: we are in the [a,b] interval                 --
+----------------------------------------------------------------------
+
+-- Specification node with explicit clock as an argument 
+
+node timeab_exp (const a,b: int; clk: int) returns (isin: bool);
+(*@contract
+    assume a>=0;                -- valid interval 
+    -- assume true -> pre clk = clk -1; -- some hypothesis on clocks
+*)
+let
+    isin = clk >= a and clk <= b;
+tel
+
+-- Implementation node exposing all internal flows to specifying them
+
+node timeab_tmp (const a,b: int) returns (internal_clk: int;
+     		       	    	 	  inside_time_interval: bool);
+(*@contract
+	var clk : int = 0 -> 1 + pre clk;
+	assume a>=0;
+	guarantee (clk <= b) => (internal_clk = clk);
+*)
+let
+    internal_clk = min((0 -> 1 + pre internal_clk), b);
+    inside_time_interval = (((internal_clk >= a) and (not ((-1 -> pre internal_clk) = b))));
+tel
+
+-- Final Implementation node hiding internal flows
+
+node timeab (const a,b: int) returns (inside_time_interval: bool);
+(*@contract
+	var clk : int = 0 -> 1 + pre clk;
+	assume a>=0 and b>a;
+	guarantee inside_time_interval = timeab_exp(a,b, clk);
+*)
+var iclk: int; 
+let
+   iclk, inside_time_interval = timeab_tmp(a,b);
+tel
+
+
+
+----------------------------------------------------------------------
+--                            Eventually                            --
+----------------------------------------------------------------------
+
+-- Eventually True:
+-- true when we are sure that property is satisfied
+node eventually_true (const a,b: int ; phi: bool)
+             returns (output_ev_true: bool);
+(*@contract
+  assume a<b and a >=0;
+*)
+(* contract is disabled and is addressed in a separate proof node
+  var clk : int = 0 -> 1 + pre clk;
+  assume a<b and a>=0;
+  -- base case: [a,a+1]
+   guarantee (b=a+1) =>
+         output_ev_true = P_at_k(a,clk,phi) or P_at_k(a+1,clk,phi);
+  -- ind. case: [a,b+1] assuming all intervals [i,j]
+  --            included in [a,b] are valid
+   guarantee (b>a+1) =>
+     output_ev_true = eventually_true(a,b-1,phi) or P_at_k(b,clk,phi);
+*)
+let
+   output_ev_true = exist (timeab (a, b), phi);
+tel
+
+
+-- Proof node 
+node proof_ev_true(const a,b: int ; phi: bool)
+             returns (base_case,ind_case: bool);
+(*@contract
+   assume a<b and a>=0;
+   guarantee base_case;
+   guarantee ind_case;
+*)
+var clk : int;
+    output_ev_true, output_ev_true_bp1: bool;
+let
+  clk = 0 -> 1 + pre clk;
+  output_ev_true = eventually_true (a,b,phi);
+  output_ev_true_bp1 = eventually_true (a,b+1,phi);
+
+  base_case = (b=a+1) =>
+          (output_ev_true = P_at_k(a,clk,phi) or P_at_k(a+1,clk,phi));
+          
+  ind_case =
+         (output_ev_true_bp1 = (output_ev_true or P_at_k(b+1,clk,phi)));
+tel
+
+
+
+-- Version w. two nodes: no contracts, these are synchronous observers
+
+node proof_ev_true_base(const a,b: int ; phi: bool)
+             returns (base_case: bool);
+var clk : int;
+    output_ev_true: bool;
+let
+  clk = 0 -> 1 + pre clk;
+  output_ev_true = eventually_true (a,b,phi);
+  base_case = (b=a+1) =>
+          (output_ev_true = P_at_k(a,clk,phi) or P_at_k(a+1,clk,phi));
+tel
+
+node proof_ev_true_ind(const a,b: int ; phi: bool)
+             returns (ind_case: bool);
+var clk : int;
+    output_ev_true, output_ev_true_bp1: bool;
+let
+  clk = 0 -> 1 + pre clk;
+  output_ev_true = eventually_true (a,b,phi);
+  output_ev_true_bp1 = eventually_true (a,b+1,phi);
+  ind_case =
+       (output_ev_true_bp1 = (output_ev_true or P_at_k(b+1,clk,phi)));
+tel
+
+
+
+-- Eventually False: 
+-- true when we are sure that property is not satisfied
+
+node eventually_false (const a,b: int ; phi: bool) 
+returns (output_ev_false: bool);
+var ev_time: int;
+let
+    ev_time = min(0 -> pre ev_time + 1, b);
+
+    output_ev_false = (ev_time = b) and 
+    (forall_a (timeab (a,b), not phi));
+tel
+
+
+-- Proof node
+node proof_ev_false(const a,b: int ; phi: bool)
+             returns (base_case,ind_case: bool);
+(*@contract
+    assume a<b and a>=0;
+    guarantee base_case;
+    guarantee ind_case;
+*)
+var clk : int;
+    output_ev_false, output_ev_false_bp1: bool;
+let
+
+  clk = 0 -> 1 + pre clk;
+  
+  output_ev_false = eventually_false(a,b,phi);
+  output_ev_false_bp1 = eventually_false(a,b+1,phi);
+  
+  base_case = (b=a+1) =>
+    (output_ev_false = 
+       (clk >= a+1 and P_at_k(a,clk, not phi) 
+       and P_at_k(a+1, clk, not phi)));
+
+  ind_case = (output_ev_false_bp1 = (output_ev_false and 
+       P_at_k(b+1, clk, not phi)));
+tel
+
+
+
+--------------------- Eventually three-valued  -----------------------
+
+node eventually_3v(const a,b:int; phi: bool)
+  returns (output_ev_true, output_ev_false: bool);
+(*@contract
+  assume a<b and a>=0;
+  
+  -- their are mutually exclusives
+  guarantee not (output_ev_true and output_ev_false);  
+*)
+let
+  output_ev_true = eventually_true(a,b,phi);
+  output_ev_false = eventually_false(a,b,phi);
+tel
+
