@@ -1,5 +1,5 @@
 # STL_synchronous_observers
-Artifacts from the article “Formally proved specification of non-nested STL as synchronous observers”.
+Artefacts from the article “Formally proved specification of non-nested STL as synchronous observers”.
 
 - spring_mass folder contains the Lustre file for implementing the mass-spring system, as well as the P1, P2, P3 and P4 test files compiled, ready for use with lustrec.
 
